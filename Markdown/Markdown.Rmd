@@ -1,0 +1,1832 @@
+---
+title: "Markdown"
+author: "Nathan Justice"
+date: "November 8, 2018"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 1
+    toc_flaot: true
+---
+
+```{r setup, include=FALSE}
+setwd("C:/Users/Nathan/Desktop/Project 1/Markdown")
+```
+
+# Research Question
+
+Do characteristics related to history and composition of flying fox camps affect the risk of Hendra virus spillover to horses?
+* History: Circumstances of establishment, Patterns of occupation over time
+* Composition: Species present, Population sizes
+
+# Hypothesis
+Flying fox camps that were recently established during a food shortage, that are continuously occupied, and that contain black flying foxes are more likely to be the source of Hendra virus spillover compared to camps with other attributes.
+
+
+# Data Wrangling
+
+## The purpose of this section is to clean and normalize source data, as well as append columns of new information to each dataset. 
+
+### Overview
+
+Camp Dataset
+* Clean source data
+* Append supplementary entries
+* Append landuse information
+* Append establishment information
+* Append flying fox census information
+
+Spillover Dataset
+* Clean source data
+
+Study Area
+* Create new shapefile
+
+Horse Property Datasets
+* Clean source data
+
+```{r}
+###################################################################################################
+# Set Working Environment and Import Dependencies
+###################################################################################################
+
+#setwd("C:/Users/Nathan/Desktop/Project 1/Code")
+
+library(sp)
+library(rgdal)
+library(rgeos)
+library(dismo)
+
+###################################################################################################
+# Build and Clean Camp Dataset
+###################################################################################################
+
+# load source data
+CAMP <- read.csv("../Data/Source/Camp/Camp_Download.csv", stringsAsFactors=F)
+# trim invalid columns
+CAMP <- CAMP[,2:ncol(CAMP)]
+# rename columns
+colnames(CAMP) <- c("Id", "Roost", "Lat", "Long", "State",  "Cont", "Status", "Post_10",
+                    "Post_07", "Hist", "Bff6", "GHff6", "LRff6", "Tot6", "Bff7", "GHff7",
+                    "LRff7", "Tot7", "Bff8", "GHff8", "LRff8", "Tot8", "Bff10", "GHff10",
+                    "LRff10", "Tot10")
+
+# load supplemental camp rows
+campAdd <- read.csv("../Data/Source/Camp/Camp_Download_Additional.csv", stringsAsFactors=F)
+# trim invalid rows
+campAdd <- subset(campAdd, ROOST != "")
+# rename columns
+colnames(campAdd) <- c("Id", "Roost", "Lat", "Long", "State",  "Cont", "Status", "Post_10",
+                       "Post_07", "Hist", "Bff6", "GHff6", "LRff6", "Tot6", "Bff7", "GHff7",
+                       "LRff7", "Tot7", "Bff8", "GHff8", "LRff8", "Tot8", "Bff10", "GHff10",
+                       "LRff10", "Tot10")
+
+# merge supplemental rows with main dataframe
+CAMP <- rbind(CAMP, campAdd)
+# remove duplicated rows
+CAMP <- CAMP[which(duplicated(CAMP$Roost) == F),]
+# append unique identifier composed of lat-long coordinate pairs
+CAMP$Coords <- paste(CAMP$Lat, CAMP$Long, sep=", ")
+
+# load dataset with landuse information
+campLA <- read.csv("../Data/Source/Camp/Camp_Download_Landuse.csv", stringsAsFactors=F)
+# remove duplicated rows
+campLA <- campLA[which(duplicated(campLA$ROOST) == F),]
+# append unique identifier comosed of lat-long coordinate pairs
+campLA$Coords <- paste(campLA$LAT, campLA$LONG, sep=", ")
+
+# loop through each camp
+for (i in 1:nrow(CAMP)) {
+  # loop through each landuse entry
+  for (j in 1:nrow(campLA)) {
+    # append landuse information to the corresponding camp in the main dataframe
+    if ((CAMP$Roost[i] == campLA$ROOST[j]) && (CAMP$Coords[i]) == campLA$Coords[j]) {
+      CAMP$Fa_Size[i] <- campLA$fa.size[j]
+      CAMP$Dist_Urb[i] <- campLA$dist_urb[j]
+      CAMP$Prop_Mod[i] <- campLA$prop_mod[j]
+      CAMP$Prop_Urb[i] <- campLA$prop_urb[j]
+      CAMP$Prop_Veg[i] <- campLA$prop_veg[j]
+      CAMP$Cont_Bff[i] <- campLA$BFF_cont[j]
+    }
+  }
+}
+
+# append unique numeric identifier
+CAMP$Id <- seq(1, nrow(CAMP), 1)
+# rename rows
+rownames(CAMP) <- seq(1, nrow(CAMP), 1)
+
+# standardize state values
+CAMP$State[CAMP$State == "Qld"] <- "Queensland"
+CAMP$State[CAMP$State == "qld"] <- "Queensland"
+CAMP$State[CAMP$State == "nsw"] <- "New South Wales"
+
+# hot-fix trailing whitespace in roost name
+CAMP$Roost[which(CAMP$Roost == "Woolgoolga ")] <- "Woolgoolga"
+
+###################################################################################################
+# Fix Erroneous, Meaningless, and Inconsistent Values in Camp Dataset
+###################################################################################################
+
+### Issue 1. ###
+# problem: value of the 'Status' column is an empty string and has no meaning
+# resolution: reassign the 'Status' column value with NA and reassign the corresponding 'Cont'
+  # column value with 0
+
+for (i in 1:nrow(CAMP)) {
+  if (CAMP$Status[i] == "") {
+    CAMP$Status[i] <- NA
+    CAMP$Cont[i] <- 0
+  }
+}
+
+### Issue 2. ###
+# problem: value of the 'Cont' column doesn't reflect the corresponding value of the 'Status' column,
+  # the value of the 'Cont' column is based on the value of the 'Status' column and needs to be
+  # a consistent reflection
+# resolution: reassign the 'Cont' column value with 1 when the corresponding value of the 'Status'
+  # column is equal to "c"
+
+for (i in 1:nrow(CAMP)) {
+  if (!is.na(CAMP$Status[i]) && CAMP$Status[i] == "c" && CAMP$Cont[i] == 0) {
+    CAMP$Cont[i] <- 1
+  }
+}
+
+### Issue 3. ###
+# problem: value of one or multiple population count is equal to the string "PRESENT" and is
+  # inconsistent with the rest of the column's data because all values in these columns should have
+  # a numeric data type
+# resolution: reassign the population count column value with NA because a raw number cannot be
+  # determined retrospectively
+
+# store the camps that are going to be modified because they will need to be accounted for when the
+  # columns describing flying fox presence/absence in each month are created
+campWithPres <- subset(CAMP, Bff6 == "PRESENT")
+
+CAMP[CAMP == "PRESENT"] <- NA
+
+### Issue 4. ###
+# problem: some values of the 'Bff10' column that are meant to be NA are instead the string " NA"
+# resolution: reassign the 'Bff10' column value with NA where it equals the string " NA"
+
+for (i in 1:nrow(CAMP)) {
+  if (!is.na(CAMP$Bff10[i]) && CAMP$Bff10[i] == " NA") {
+    CAMP$Bff10[i] <- NA
+  }
+}
+
+### Issue 5. ###
+# problem: the value of the 'Cont' column is equal to 1 (true) but the values of the corresponding
+  # population count columns are not valid across all four months and is inconsistent with the rest
+  # of the dataset
+# details:
+  # a) a value of 0 in any population count column for a given month means the camp was surveyed
+    # in said month but no flying foxes were observed
+  # b) a value of NA in all four population count columns for a given month means the camp was not
+    # surveyed in said month
+  # c) when the value of the species population count columns for a given month all equal NA and the
+    # corresponding total population column in said month has a value not equal to NA implies the
+    # camp was surveyed in said month but the total number of flying foxes (if any) were not
+    # allocated across species
+  # d) the value of the 'Cont' clumn was determined beyond the temporal scope of the dataset and
+    # should not be changed
+# resolution: instances in which a total population count for a given month was reported, not equal
+  # to NA, and not allocated across species, but the corresponding species population count columns
+  # in said month have a value of 0 should be reassigned to NA
+# example:
+  # a scenario like
+    # Bff6 == 0
+    # GHff6 == 0
+    # LRff6 == 0
+    # Tot6 == 100
+  # should be changed to
+    # Bff6 == NA
+    # GHff6 == NA
+    # LRff6 == NA
+    # Tot6 == 100
+
+CAMP$Bff6[which(CAMP$Roost == "Casino")] <- NA
+CAMP$GHff6[which(CAMP$Roost == "Casino")] <- NA
+CAMP$LRff6[which(CAMP$Roost == "Casino")] <- NA
+
+CAMP$Bff10[which(CAMP$Roost == "Bongaree, Shirley Creek")] <- NA
+CAMP$GHff10[which(CAMP$Roost == "Bongaree, Shirley Creek")] <- NA
+CAMP$LRff10[which(CAMP$Roost == "Bongaree, Shirley Creek")] <- NA
+
+### Issue 6. ###
+# problem: value of the 'Bff' and 'LRff' columns in a given month have a raw numeric count while the
+  # value of the corresponding 'GHff' column in said month has a value equal to NA is erroneous
+  # because the species allocation of the population survey total is all or nothing
+# resolution: reassign the 'GHff' column value under this circumstance with 0
+
+for (i in 1:nrow(CAMP)) {
+  if (!is.na(CAMP$Bff6[i]) && is.na(CAMP$GHff6[i]) && !is.na(CAMP$LRff6[i])) {
+    CAMP$GHff6[i] <- 0
+  }
+
+  if (!is.na(CAMP$Bff7[i]) && is.na(CAMP$GHff7[i]) && !is.na(CAMP$LRff7[i])) {
+    CAMP$GHff7[i] <- 0
+  }
+
+  if (!is.na(CAMP$Bff8[i]) && is.na(CAMP$GHff8[i]) && !is.na(CAMP$LRff8[i])) {
+    CAMP$GHff8[i] <- 0
+  }
+
+  if (!is.na(CAMP$Bff10[i]) && is.na(CAMP$GHff10[i]) && !is.na(CAMP$LRff10[i])) {
+    CAMP$GHff10[i] <- 0
+  }
+}
+
+### Issue 7. ###
+# problem: value of the 'GHff' and 'LRff' columns in a given month have a raw numeric count while
+  # the value of the corresponding 'Bff' column in said month has a value equal to NA is erroneous
+  # because the species allocation of the population survey total is all or nothing
+# resolution: reassign the 'Bff' column value under this circumstance with 0
+
+
+for (i in 1:nrow(CAMP)) {
+  if (is.na(CAMP$Bff6[i]) && !is.na(CAMP$GHff6[i]) && !is.na(CAMP$LRff6[i])) {
+    CAMP$Bff6[i] <- 0
+  }
+
+  if (is.na(CAMP$Bff7[i]) && !is.na(CAMP$GHff7[i]) && !is.na(CAMP$LRff7[i])) {
+    CAMP$Bff7[i] <- 0
+  }
+
+  if (is.na(CAMP$Bff8[i]) && !is.na(CAMP$GHff8[i]) && !is.na(CAMP$LRff8[i])) {
+    CAMP$Bff8[i] <- 0
+  }
+
+  if (is.na(CAMP$Bff10[i]) && !is.na(CAMP$GHff10[i]) && !is.na(CAMP$LRff10[i])) {
+    CAMP$Bff10[i] <- 0
+  }
+}
+
+### Issue 8. ###
+# problem: value of the 'Tot' column in a given month does not equal the sum of the species
+  # population count columns in said month and is inconsistent with the rest of the dataset
+# resolution: 'Tot' column values in a given month equal to 99 when the value of all three
+  # corresponding species population count columns for said month are equal to NA should be
+  # reassigned with NA
+
+for (i in 1:nrow(CAMP)) {
+  if (!is.na(CAMP$Tot6[i])) {
+    if (is.na(CAMP$Bff6[i]) && is.na(CAMP$GHff6[i]) && is.na(CAMP$LRff6[i])) {
+      if (CAMP$Tot6[i] == "99") {
+        CAMP$Tot6[i] <- NA
+      }
+    }
+  }
+
+  if (!is.na(CAMP$Tot7[i])) {
+    if (is.na(CAMP$Bff7[i]) && is.na(CAMP$GHff7[i]) && is.na(CAMP$LRff7[i])) {
+      if (CAMP$Tot7[i] == "99") {
+        CAMP$Tot7[i] <- NA
+
+      }
+    }
+  }
+
+  if (!is.na(CAMP$Tot8[i])) {
+    if (is.na(CAMP$Bff8[i]) && is.na(CAMP$GHff8[i]) && is.na(CAMP$LRff8[i])) {
+      if (CAMP$Tot8[i] == "99") {
+        CAMP$Tot8[i] <- NA
+      }
+    }
+  }
+
+  if (!is.na(CAMP$Tot10[i])) {
+    if (is.na(CAMP$Bff10[i]) && is.na(CAMP$GHff10[i]) && is.na(CAMP$LRff10[i])) {
+      if (CAMP$Tot10[i] == "99") {
+        CAMP$Tot10[i] <- NA
+      }
+    }
+  }
+}
+
+###################################################################################################
+# Assert Numeric Data Type of the Population Counts for Each Species in Each Month
+###################################################################################################
+
+# assert conversion of June population counts to numeric
+CAMP$Bff6 <- as.numeric(CAMP$Bff6)
+CAMP$GHff6 <- as.numeric(CAMP$GHff6)
+CAMP$LRff6 <- as.numeric(CAMP$LRff6)
+CAMP$Tot6 <- as.numeric(CAMP$Tot6)
+
+# assert conversion of July population counts to numeric
+CAMP$Bff7 <- as.numeric(CAMP$Bff7)
+CAMP$GHff7 <- as.numeric(CAMP$GHff7)
+CAMP$LRff7 <- as.numeric(CAMP$LRff7)
+CAMP$Tot7 <- as.numeric(CAMP$Tot7)
+
+# assert conversion of August population counts to numeric
+CAMP$Bff8 <- as.numeric(CAMP$Bff8)
+CAMP$GHff8 <- as.numeric(CAMP$GHff8)
+CAMP$LRff8 <- as.numeric(CAMP$LRff8)
+CAMP$Tot8 <- as.numeric(CAMP$Tot8)
+
+# assert conversion of October population counts to numeric
+CAMP$Bff10 <- as.numeric(CAMP$Bff10)
+CAMP$GHff10 <- as.numeric(CAMP$GHff10)
+CAMP$LRff10 <- as.numeric(CAMP$LRff10)
+CAMP$Tot10 <- as.numeric(CAMP$Tot10)
+
+###################################################################################################
+# Append Columns Describing the Establishment History of the Camp Dataset
+###################################################################################################
+
+# storage for years that experienced a food shortage
+shortYears <- c(1998, 2003, 2007, 2010)
+
+# loop through each camp
+for (i in 1:nrow(CAMP)) {
+  # catch the value describing the establishment history of the camp in focus
+  estab <- CAMP$Hist[i]
+
+  # for each level of the establishment history, assign/append values appropriately describing
+  #   the following variables:
+  #
+  # Post_98: 1 (true), 0 (false), NA (unknown) - camp was established in 1998 or later
+  # Post_03: 1 (true), 0 (false), NA (unknown) - camp was established in 2003 or later
+  # Hist_Simp: 'Pre-2007', '2007-2009', '2010', unknown (NA) - classification of the year the camp
+  #   was established
+  # Short_07_10: 1 (true), 0 (false), NA (unknown) - camp was established in 2007 or 2010
+  # Short_Any: 1 (true), 0 (false), NA (unknown) - camp was established in any of the years
+    # which experienced a food shortage (1998, 2003, 2007, 2010)
+
+  if (estab == "1998") {
+    CAMP$Post_98[i] <- 1
+    CAMP$Post_03[i] <- 0
+    CAMP$Hist_Simp[i] <- "Pre-2007"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- 1
+  }  else if (estab == "2001") {
+    CAMP$Post_98[i] <- 1
+    CAMP$Post_03[i] <- 0
+    CAMP$Hist_Simp[i] <- "Pre-2007"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- 0
+  } else if (estab == "2002") {
+    CAMP$Post_98[i] <- 1
+    CAMP$Post_03[i] <- 0
+    CAMP$Hist_Simp[i] <- "Pre-2007"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- 0
+  } else if (estab == "2003") {
+    CAMP$Post_98[i] <- 1
+    CAMP$Post_03[i] <- 1
+    CAMP$Hist_Simp[i] <- "Pre-2007"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- 1
+  } else if (estab == "2007") {
+    CAMP$Post_98[i] <- 1
+    CAMP$Post_03[i] <- 1
+    CAMP$Hist_Simp[i] <- "2007-2009"
+    CAMP$Short_07_10[i] <- 1
+    CAMP$Short_Any[i] <- 1
+  } else if (estab == "2008") {
+    CAMP$Post_98[i] <- 1
+    CAMP$Post_03[i] <- 1
+    CAMP$Hist_Simp[i] <- "2007-2009"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- 0
+  } else if (estab == "2009") {
+    CAMP$Post_98[i] <- 1
+    CAMP$Post_03[i] <- 1
+    CAMP$Hist_Simp[i] <- "2007-2009"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- 0
+  } else if (estab == "2010") {
+    CAMP$Post_98[i] <- 1
+    CAMP$Post_03[i] <- 1
+    CAMP$Hist_Simp[i] <- "2010"
+    CAMP$Short_07_10[i] <- 1
+    CAMP$Short_Any[i] <- 1
+  } else if (estab == "uk") {
+    CAMP$Post_98[i] <- NA
+    CAMP$Post_03[i] <- NA
+    CAMP$Hist_Simp[i] <- NA
+    CAMP$Short_07_10[i] <- NA
+    CAMP$Short_Any[i] <- NA
+  } else if (estab == "uk pre 2002") {
+    CAMP$Post_98[i] <- NA
+    CAMP$Post_03[i] <- 0
+    CAMP$Hist_Simp[i] <- "Pre-2007"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- NA
+  } else if (estab == "uk pre 2003") {
+    CAMP$Post_98[i] <- NA
+    CAMP$Post_03[i] <- 0
+    CAMP$Hist_Simp[i] <- "Pre-2007"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- NA
+  } else if (estab == "uk pre 2004") {
+    CAMP$Post_98[i] <- NA
+    CAMP$Post_03[i] <- NA
+    CAMP$Hist_Simp[i] <- "Pre-2007"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- NA
+  } else if (estab == "uk pre 2005") {
+    CAMP$Post_98[i] <- NA
+    CAMP$Post_03[i] <- NA
+    CAMP$Hist_Simp[i] <- "Pre-2007"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- NA
+  } else if (estab == "uk pre 2006") {
+    CAMP$Post_98[i] <- NA
+    CAMP$Post_03[i] <- NA
+    CAMP$Hist_Simp[i] <- "Pre-2007"
+    CAMP$Short_07_10[i] <- 0
+    CAMP$Short_Any[i] <- NA
+  } else if (estab == "uk pre 2008") {
+    CAMP$Post_98[i] <- NA
+    CAMP$Post_03[i] <- NA
+    CAMP$Hist_Simp[i] <- NA
+    CAMP$Short_07_10[i] <- NA
+    CAMP$Short_Any[i] <- NA
+  } else if (estab == "uk pre 2009") {
+    CAMP$Post_98[i] <- NA
+    CAMP$Post_03[i] <- NA
+    CAMP$Hist_Simp[i] <- NA
+    CAMP$Short_07_10[i] <- NA
+    CAMP$Short_Any[i] <- NA
+  }
+}
+
+###################################################################################################
+# Appends Columns Describing the Presence/Absence of Flying Foxes in Each Month to the Camp Dataset
+###################################################################################################
+
+# purpose: determine if flying foxes of any species were observed at each camp in a given month
+# input: vector of total flying fox population counts across all camps for a given month
+# output: vector of boolean values 1 (true), 0 (false), NA (unknown)
+monthPresAbs <- function(tot) {
+  output <- vector()
+
+  for (i in 1:length(tot)) {
+    if (!is.na(tot[i])) {
+      if (tot[i] > 0) {
+        output <- c(output, 1)
+      } else {
+        output <- c(output, 0)
+      }
+    } else {
+      output <- c(output, NA)
+    }
+  }
+
+  return(output)
+}
+
+# append flying fox presence/absence column for each month
+CAMP$Jun_Pres <- monthPresAbs(CAMP$Tot6)
+CAMP$Jul_Pres <- monthPresAbs(CAMP$Tot7)
+CAMP$Aug_Pres <- monthPresAbs(CAMP$Tot8)
+CAMP$Oct_Pres <- monthPresAbs(CAMP$Tot10)
+
+# update flying fox presence/absence columns to reflect the rows with population counts equal to
+  # the string "PRESENT" (since changed in main dataframe to NA values)
+CAMP$Jun_Pres[which(CAMP$Id == campWithPres$Id[1])] <- 1
+CAMP$Jul_Pres[which(CAMP$Id == campWithPres$Id[1])] <- 1
+CAMP$Aug_Pres[which(CAMP$Id == campWithPres$Id[1])] <- 1
+CAMP$Oct_Pres[which(CAMP$Id == campWithPres$Id[1])] <- 1
+
+CAMP$Jun_Pres[which(CAMP$Id == campWithPres$Id[2])] <- 1
+CAMP$Oct_Pres[which(CAMP$Id == campWithPres$Id[2])] <- 1
+
+###################################################################################################
+# Save Cleaned Camp Dataset
+###################################################################################################
+
+# reorganize camp dataframe
+CAMP <- data.frame(
+  Id=CAMP$Id,
+  Roost=CAMP$Roost,
+  Coords=CAMP$Coords,
+  Lat=CAMP$Lat,
+  Long=CAMP$Long,
+  State=CAMP$State,
+  Cont=CAMP$Cont,
+  Cont_Bff=CAMP$Cont_Bff,
+  Status=CAMP$Status,
+  Hist=CAMP$Hist,
+  Hist_Simp=CAMP$Hist_Simp,
+  Post_98=CAMP$Post_98,
+  Post_03=CAMP$Post_03,
+  Post_07=CAMP$Post_07,
+  Post_10=CAMP$Post_10,
+  Short_07_10=CAMP$Short_07_10,
+  Short_Any=CAMP$Short_Any,
+  Bff6=CAMP$Bff6,
+  GHff6=CAMP$GHff6,
+  LRff6=CAMP$LRff6,
+  Tot6=CAMP$Tot6,
+  Bff7=CAMP$Bff7,
+  GHff7=CAMP$GHff7,
+  LRff7=CAMP$LRff7,
+  Tot7=CAMP$Tot7,
+  Bff8=CAMP$Bff8,
+  GHff8=CAMP$GHff8,
+  LRff8=CAMP$LRff8,
+  Tot8=CAMP$Tot8,
+  Bff10=CAMP$Bff10,
+  GHff10=CAMP$GHff10,
+  LRff10=CAMP$LRff10,
+  Tot10=CAMP$Tot10,
+  Fa_Size=CAMP$Fa_Size,
+  Dist_Urb=CAMP$Dist_Urb,
+  Prop_Mod=CAMP$Prop_Mod,
+  Prop_Urb=CAMP$Prop_Urb,
+  Prop_Veg=CAMP$Prop_Veg,
+  Jun_Pres=CAMP$Jun_Pres,
+  Jul_Pres=CAMP$Jul_Pres,
+  Aug_Pres=CAMP$Aug_Pres,
+  Oct_Pres=CAMP$Oct_Pres,
+  stringsAsFactors=F
+)
+
+# save results
+#write.csv(CAMP, "../Data/Clean/Camp/Camp_Clean.csv", row.names=F)
+
+###################################################################################################
+# Initialize Spatial Objects
+###################################################################################################
+
+# load Australia shapefile
+ausLayer <- readOGR(dsn="../Data/Source/Australia", layer="STE11aAust")
+
+# create spatial subsets for each state
+qldLayer <- ausLayer[ausLayer$STATE_NAME == "Queensland",]
+nswLayer <- ausLayer[ausLayer$STATE_NAME == "New South Wales",]
+
+# store a merge of the spatial state objects for plotting purposes
+eastLayer <- rbind(qldLayer, nswLayer)
+
+# initialize projection definitions for spatial objects
+longlat <- CRS("+proj=longlat +ellps=GRS80 +no_defs")
+utm56 <- CRS("+proj=utm +zone=56 ellps=WGS84")
+
+###################################################################################################
+# Clean the Spillover Events Dataset
+###################################################################################################
+
+# load source data
+IP <- read.csv("../Data/Source/Spillover/IP_Download.csv", stringsAsFactors=F)
+
+# trim invalid columns
+IP <- IP[,1:5]
+
+# rename columns
+colnames(IP) <- c("Name", "Event", "Long", "Lat", "Month")
+
+# loop through each spillover event
+for (i in 1:nrow(IP)) {
+  # create spatial point object of spillover event in focus
+  ip <- SpatialPoints(data.frame(Long=IP$Long[i], Lat=IP$Lat[i]), proj4string=longlat)
+  # append the name of the state the spillover event in focus was located
+  IP$State[i] <- as.character(over(ip, eastLayer)$STATE_NAME)
+}
+
+# append dummy column used later for merging with horse property data
+IP$Id <- 0
+# append unique identifier composed of latitude and longitude coordinate pairs
+IP$Coords <- paste(IP$Lat, IP$Long, sep=", ")
+
+# reorganize dataframe
+IP <- data.frame(
+  Id=IP$Id,
+  Name=IP$Name,
+  Coords=IP$Coords,
+  Lat=IP$Lat,
+  Long=IP$Long,
+  State=IP$State,
+  Month=IP$Month,
+  Event=IP$Event,
+  stringsAsFactors=T
+)
+
+# save results
+#write.csv(IP, "../Data/Clean/Spillover/IP_Clean.csv", row.names=F)
+
+###################################################################################################
+# Create Spatial Object/Layer for the Study Area
+###################################################################################################
+
+# create spatial object of spillover events
+IP_sp <- SpatialPointsDataFrame(data.frame(Long=IP$Long, Lat=IP$Lat), data=IP, proj4string=longlat)
+IP_sp <- spTransform(IP_sp, utm56)
+
+# store 100km buffers drawn around each spillover event
+IP_buffer_sp <- gBuffer(IP_sp, width=100000, quadsegs=100)
+
+# change projections to longlat
+IP_sp <- spTransform(IP_sp, longlat)
+IP_buffer_sp <- spTransform(IP_buffer_sp, longlat)
+
+# ititialize storage for the coordinates that define each of the 100km buffers
+IP_buffer_coords <- data.frame()
+# loop through each 100km buffer polygon
+for (i in 1:length(IP_buffer_sp@polygons[[1]]@Polygons)) {
+  # catch polygon in focus
+  poly <- IP_buffer_sp@polygons[[1]]@Polygons[[i]]@coords
+
+  # loop through the coordinate matrix that defines the polygon in focus
+  for (j in 1:dim(poly)[1]) {
+    # catch latitude and longitude coodinates
+    x <- poly[j,1]
+    y <- poly[j,2]
+
+    # append coordate pairs to the storage object
+    IP_buffer_coords <- rbind(IP_buffer_coords, data.frame(x, y))
+  }
+}
+
+# rename columns
+colnames(IP_buffer_coords) <- c("Long", "Lat")
+
+# draw a minimum bounding box around the 100km buffers
+studyArea <- convHull(IP_buffer_coords)
+
+# create spatial object of the study area
+studyAreaLayer <- SpatialPolygons(studyArea@polygons@polygons, proj4string=longlat)
+studyAreaLayer <- SpatialPolygonsDataFrame(studyAreaLayer, data.frame(ID=1))
+
+# check the accuracy of the study area spatial object
+#plot(eastLayer)
+#plot(studyAreaLayer, col="gray", add=T)
+
+# save results - NOTE: failure + error message will be thrown if the shapefile already exists in the
+  # target directory
+#writeOGR(obj=studyAreaLayer, dsn="../Data/Clean/Study Area", layer="StudyArea",
+#         driver="ESRI Shapefile")
+
+###################################################################################################
+# Clean Horse Property Datasets for both Queensland and New South Wales
+###################################################################################################
+
+# load source data for both states
+HORSE_qld <- readOGR(dsn="../Data/Source/Horse", layer="locsite_horsecount")
+HORSE_nsw <- readOGR(dsn="../Data/Source/Horse", layer="NSW_horse_general")
+
+# change NSW projection to longlat
+HORSE_nsw <- spTransform(HORSE_nsw, longlat)
+
+# convert QLD spatial object from polygons to points by using the geometric center of each polygon
+HORSE_qld_p <- gCentroid(HORSE_qld, byid=T)
+HORSE_qld <- SpatialPointsDataFrame(HORSE_qld_p@coords, data=HORSE_qld@data, proj4string=longlat)
+
+# store the dataframes behind the spatial objects of both states
+HORSE_qldDF <- HORSE_qld@data
+HORSE_nswDF <- HORSE_nsw@data
+
+# loop through each of the coordinate pairs defining the QLD spatial object
+for (i in 1:dim(HORSE_qld@coords)[1]) {
+  # append geographic coordinates of the property in focus to the QLD dataframe
+  HORSE_qldDF$Lat[i] <- HORSE_qld@coords[i,2]
+  HORSE_qldDF$Long[i] <- HORSE_qld@coords[i,1]
+  # append unique identifier composed of latitude and longitude coordinate pairs
+  HORSE_qldDF$Coords[i] <- paste(HORSE_qld@coords[i,2], HORSE_qld@coords[i,1], sep=", ")
+}
+
+# loop through each of the coordinate pairs defining the NSW spatial object
+for (i in 1:dim(HORSE_nsw@coords)[1]) {
+  # append geographic coordinates of the property in focus to the NSW dataframe
+  HORSE_nswDF$Lat[i] <- HORSE_nsw@coords[i,2]
+  HORSE_nswDF$Long[i] <- HORSE_nsw@coords[i,1]
+  # append unique identifier composed of latitude and longitude coordinate pairs
+  HORSE_nswDF$Coords[i] <- paste(HORSE_nsw@coords[i,2], HORSE_nsw@coords[i,1], sep=", ")
+}
+
+###################################################################################################
+# Remove Duplicates from Horse Property Datasets for both Queensland and New South Wales
+###################################################################################################
+
+# purpose: remove duplicated horse property entries based on geographic coordinate pairs
+# input: a dataframe of horse property data
+# output: a copy of the passed dataframe with all duplicated entries removed
+removeDupHp <- function(df) {
+  df$Id <- seq(1, nrow(df), 1)
+  dups <- duplicated(df$Coords)
+  remove <- vector()
+
+  for (i in 1:length(dups)) {
+    if (dups[i]) {
+      remove <- c(remove, i)
+    }
+  }
+
+  return(df[!(df$Id %in% remove),])
+}
+
+# remove duplicated entries based on geographic coordinate pairs (value of the 'Coords' column)
+HORSE_qld <- removeDupHp(HORSE_qldDF)
+HORSE_nsw <- removeDupHp(HORSE_nswDF)
+
+###################################################################################################
+# Save Cleaned Horse Property Datasets
+###################################################################################################
+
+# append unique numeric identifiers
+HORSE_qld$Id <- seq(1, nrow(HORSE_qld), 1)
+HORSE_nsw$Id <- seq(1, nrow(HORSE_nsw), 1)
+
+# reorganize QLD dataframe
+HORSE_qld <- data.frame(
+  Id=HORSE_qld$Id,
+  Name="RP",
+  Coords=HORSE_qld$Coords,
+  Lat=HORSE_qld$Lat,
+  Long=HORSE_qld$Long,
+  State="Queensland",
+  Month=NA,
+  Event=0,
+  stringsAsFactors=F
+)
+
+# reorganize NSW dataframe
+HORSE_nsw <- data.frame(
+  Id=HORSE_nsw$Id,
+  Name="RP",
+  Coords=HORSE_nsw$Coords,
+  Lat=HORSE_nsw$Lat,
+  Long=HORSE_nsw$Long,
+  State="New South Wales",
+  Month=NA,
+  Event=0,
+  stringsAsFactors=F
+)
+
+# save results
+#write.csv(HORSE_qld, "../Data/Clean/Horse/Horse_QLD_Clean.csv", row.names=F)
+#write.csv(HORSE_nsw, "../Data/Clean/Horse/Horse_NSW_Clean.csv", row.names=F)
+
+###################################################################################################
+# Build and Save the Merge of both Queensland and New South Wales Horse Property Datasets
+###################################################################################################
+
+# merge QLD and NSW datasets
+HORSE <- rbind(HORSE_qld, HORSE_nsw)
+# append unique numeric identifier
+HORSE$Id <- seq(1, nrow(HORSE), 1)
+
+# save results
+#write.csv(HORSE, "../Data/Clean/Horse/Horse_Merged_Clean.csv", row.names=F)
+
+```
+
+# Spatial Analysis
+
+## The purpose of this section is to append information regarding spatial relationships between the datasets.
+
+### Overview
+
+Horse Property Dataset
+* Create subselection of properties within the study area
+
+Camp Dataset
+* Determine which are closest to a spillover event and occupied in the same month - definition of "Event Camp"
+* Append information about surrounding properties
+
+Random Point (RP) Dataset
+* Construct dataset of control candidates for each state in each month based on whether or not properties intersect 20km buffers around camps occupied by flying foxes in the given month
+
+Random Point - Infection Premise (RPIP) Dataset
+* Merge of IP and RP Datasets
+* Append information about closest occupied camp 
+
+^^^ This dataset is used in models for the case-control study design
+
+```{r}
+###################################################################################################
+# Set Working Environment and Import Dependencies
+###################################################################################################
+
+#setwd("C:/Users/Nathan/Desktop/Project 1/Code")
+
+library(sp)
+library(rgdal)
+library(rgeos)
+library(dismo)
+library(geosphere)
+
+###################################################################################################
+# Load Datasets and Initialize Global Variables
+###################################################################################################
+
+# load cleaned camp data
+CAMP <- read.csv("../Data/Clean/Camp/Camp_Clean.csv", stringsAsFactors=F)
+# load cleaned spillover data
+IP <- read.csv("../Data/Clean/Spillover/IP_Clean.csv", stringsAsFactors=F)
+# load cleaned horse property data
+HORSE <- read.csv("../Data/Clean/Horse/Horse_Merged_Clean.csv", stringsAsFactors=F)
+# load study area spatial object
+studyAreaLayer <- readOGR(dsn="../Data/Clean/Study Area", layer="StudyArea")
+
+# initialize projection definitions for spatial objects
+longlat <- CRS("+proj=longlat +ellps=GRS80 +no_defs")
+utm56 <- CRS("+proj=utm +zone=56 ellps=WGS84")
+
+###################################################################################################
+# Build Subset of Horse Properties that are Within the Study Area
+###################################################################################################
+
+# create spatial object of horse properties
+HORSE_sp <- SpatialPointsDataFrame(data.frame(HORSE$Long, HORSE$Lat), HORSE, proj4string=longlat)
+
+# create boolean vector of horse properties that intersect the study area
+HORSE_sa <- over(HORSE_sp, studyAreaLayer)
+# initialize storage for the indices of intersecting properties
+inSA <- vector()
+# loop through each boolean
+for (i in 1:nrow(HORSE_sa)) {
+  if (!is.na(HORSE_sa$ID[i])) {
+    # append index of horse property if it's within study area
+    inSA <- c(inSA, i)
+  }
+}
+
+# save subset of horse property data within study area
+inSA <- HORSE[which(HORSE$Id %in% inSA),]
+# create spatial object
+HORSE_sp <- SpatialPointsDataFrame(data.frame(inSA$Long, inSA$Lat), inSA, proj4string=longlat)
+
+# append unique numeric identifier
+HORSE_sp$Id <- seq(1, nrow(HORSE_sp@data), 1)
+# rename rows
+row.names(HORSE_sp) <- seq(1, nrow(HORSE_sp@data), 1)
+# catch the dataframe behind spatial object
+HORSE <- HORSE_sp@data
+
+###################################################################################################
+# Determine Which Camps are the Closest to an IP and Occupied in the Same Month
+###################################################################################################
+
+# purpose: subset the camp dataframe for rows with flying fox population counts in a given month
+  # not equal to NA
+# input: string for month of interest, camp dataframe
+# output: subset of camp dataframe
+makeCampPool <- function(month, CAMP) {
+  if (month == "June") {
+    return(subset(CAMP, Jun_Pres == 1))
+  } else if (month == "July") {
+    return(subset(CAMP, Jul_Pres == 1))
+  } else if (month == "August") {
+    return(subset(CAMP, Aug_Pres == 1))
+  } else if (month == "October") {
+    return(subset(CAMP, Oct_Pres == 1))
+  }
+}
+
+# ititialize Boolean column for closest occupied camp to an IP
+CAMP$Close_To_Ip <- 0
+# loop through each IP
+for (i in 1:nrow(IP)) {
+  # ititialize storage for distances
+  dists <- vector()
+  # subset camps occupied in the same month as the IP in focus
+  campPool <- makeCampPool(IP$Month[i], CAMP)
+
+  # loop through each camp and compute the distance
+  for (j in 1:nrow(campPool)) {
+    dists <- c(dists, distm(c(IP$Long[i], IP$Lat[i]), c(campPool$Long[j], campPool$Lat[j])))
+  }
+
+  # update Boolean value for the closest occupied camp to the IP in focus
+  CAMP$Close_To_Ip[campPool$Id[match(min(dists), dists)]] <- 1
+}
+
+###################################################################################################
+# Append the Coordinates of the Nearest Horse Property
+###################################################################################################
+
+# lopo through each camp
+for (i in 1:nrow(CAMP)) {
+  # create spatial object of horse properties
+  horse <- SpatialPointsDataFrame(data.frame(HORSE$Long, HORSE$Lat), HORSE, proj4string=longlat)
+  horse <- spTransform(horse, utm56)
+
+  # create spatial object of camp in focus
+  camp <- SpatialPoints(data.frame(CAMP$Long[i], CAMP$Lat[i]), proj4string=longlat)
+  camp <- spTransform(camp, utm56)
+
+  # find the closest horse property
+  dists <- gDistance(camp, horse, byid=T)
+  closest <- HORSE[match(min(dists), dists),]
+
+  # append the coordinates
+  CAMP$Near_Hp_Coords[i] <- closest$Coords
+}
+
+###################################################################################################
+# Append Information About Surrounding Horse Properties
+###################################################################################################
+
+# merge horse property and IP data
+RPIP <- rbind(IP, HORSE)
+# append unique numeric identifier
+RPIP$Id <- seq(1, nrow(RPIP), 1)
+# update row names
+row.names(RPIP) <- seq(1, nrow(RPIP), 1)
+
+# loop through each camp
+for (i in 1:nrow(CAMP)) {
+  # create spatial object for properties
+  rpip <- SpatialPointsDataFrame(data.frame(RPIP$Long, RPIP$Lat), RPIP, proj4string=longlat)
+
+  # create spatial object for camp in focus
+  camp <- SpatialPoints(data.frame(CAMP$Long[i], CAMP$Lat[i]), proj4string=longlat)
+  camp <- spTransform(camp, utm56)
+
+  # draw 20km buffers around each camp
+  camp_buff <- gBuffer(camp, width=20000, quadsegs=100)
+  camp_buff <- spTransform(camp_buff, longlat)
+
+  # compute the number of properties within 20km of the camp in focus
+  within <- over(rpip, camp_buff)
+  count <- 0
+  for (j in within) {
+    if (!is.na(j)) {
+      count <- count + 1
+    }
+  }
+
+  # append Boolean column for if a property is within 20km of the camp in focus
+  if (count > 0) {
+    CAMP$Prop_In_20km[i] <- 1
+  } else {
+    CAMP$Prop_In_20km[i] <- 0
+  }
+
+  # append new column
+  CAMP$Prop_Num_20km[i] <- count
+
+  # append the distance to the nearest property to the camp in focus
+  rpip <- spTransform(rpip, utm56)
+  dists <- gDistance(camp, rpip, byid=T)
+
+  CAMP$Prop_Near_Dist[i] <- min(dists)
+}
+
+###################################################################################################
+# Append Event Column for Model Clarity
+###################################################################################################
+
+# copy column for model clarity
+for (i in 1:nrow(CAMP)) {
+  if (CAMP$Close_To_Ip[i]) {
+    CAMP$Event[i] <- 1
+  } else {
+    CAMP$Event[i] <- 0
+  }
+}
+
+###################################################################################################
+# Update Close_To_Ip Column for Validating Horse Properties
+###################################################################################################
+
+# ititialize coordinates of camps that were the nearest camp to 2013 spillover events
+campDrops <- data.frame(Lat=c(-27.468, -30.726, -31.084), Long=c(152.5886, 152.926, 152.843))
+campDrops$Coords <- paste(campDrops$Lat, campDrops$Long, sep=", ")
+
+# change column value to sentinal to signal these camps should not be used when validating horse
+  # properties
+for (i in 1:nrow(CAMP)) {
+  for (j in 1:nrow(campDrops)) {
+    if (CAMP$Coords[i] == campDrops$Coords[j]) {
+      CAMP$Close_To_Ip[i] <- -1
+    }
+  }
+}
+
+# save results
+#write.csv(CAMP, "../Data/Final/Camp/Camp_Final.csv", row.names=F)
+
+###################################################################################################
+# Validate Horse Properties for Case-Control Design
+###################################################################################################
+
+# purpose: create subset of horse properties that are viable control candidates based on whether or
+  # not they intersect a 20km buffer around all of the camps occupied in a given month
+# input: month of interest, camp dataframe, horse property dataframe
+# output: subset of viable horse property controls for a given month
+validateHorses <- function(month, CAMP, HORSE) {
+  # exclude camps nearest a spillover event, including those nearest 2013 spillover events
+  camps <- subset(CAMP, Close_To_Ip == 0)
+
+  # subset camps based on occupancy in the specified month
+  if (month == "June") {
+    camps <- subset(camps, Jun_Pres == 1)
+  } else if (month == "July") {
+    camps <- subset(camps, Jul_Pres == 1)
+  } else if (month == "August") {
+    camps <- subset(camps, Aug_Pres == 1)
+  } else if (month == "October") {
+    camps <- subset(camps, Oct_Pres == 1)
+  }
+
+  # create spatial object of camps
+  camps <- SpatialPoints(data.frame(camps$Long, camps$Lat), proj4string=longlat)
+  camps <- spTransform(camps, utm56)
+
+  # draw 20km buffers around each camp
+  camps_buff <- gBuffer(camps, width=20000, quadsegs=100)
+  camps_buff <- spTransform(camps_buff, longlat)
+
+  # create spatial object of horse properties
+  horses <- SpatialPointsDataFrame(data.frame(HORSE$Long, HORSE$Lat), HORSE, proj4string=longlat)
+
+  # determine which horse properties intersect the camp buffers
+  within <- over(horses, camps_buff)
+
+  # store the indices of intersecting horse properties
+  validIds <- vector()
+  for (i in 1:length(within)) {
+    if (!is.na(within[i])) {
+      validIds <- c(validIds, i)
+    }
+  }
+
+  # return the subset of horse properties that intersect 20km buffers drawn around the camps
+    # occupied in the specified month
+  return(HORSE[which(HORSE$Id %in% validIds),])
+}
+
+# validate horse property control candidates for each month
+horse6 <- validateHorses("June", CAMP, HORSE)
+horse7 <- validateHorses("July", CAMP, HORSE)
+horse8 <- validateHorses("August", CAMP, HORSE)
+horse10 <- validateHorses("October", CAMP, HORSE)
+
+# update month column
+horse6$Month <- "June"
+horse7$Month <- "July"
+horse8$Month <- "August"
+horse10$Month <- "October"
+
+# merge horse property control candidates
+HORSE_val <- rbind(horse6, horse7, horse8, horse10)
+
+###################################################################################################
+# Determine the Coordinates of the Nearest Camp to Each RPIP
+###################################################################################################
+
+# purpose: append coordinates of the nearest camp to each property
+# input: properties dataframe, camp dataframe, Boolean signaling if the first argument represents
+  # spillover events - matters because the camps closest camps to a spillover event must be masked
+  # from all other properties
+# output: updated version of the passed property dataframe
+findNearestCamp <- function(df, CAMP, isIP) {
+  # loop through each property
+  for (i in 1:nrow(df)) {
+    # subset camps based on whether or not properties represent spillover events
+    if (!isIP) {
+      camps <- subset(CAMP, State == df$State[i])
+      camps <- subset(camps, Close_To_Ip == 0)
+    } else {
+      camps <- subset(CAMP, Close_To_Ip == 1)
+    }
+
+    # subset camps for those occupied in the month matching the property in focus
+    camps <- makeCampPool(df$Month[i], camps)
+
+    # create spatial object for camps
+    camps <- SpatialPointsDataFrame(data.frame(camps$Long, camps$Lat), camps, proj4string=longlat)
+    camps <- spTransform(camps, utm56)
+
+    # create spatial object for property in focus
+    rpip <- SpatialPoints(data.frame(df$Long[i], df$Lat[i]), proj4string=longlat)
+    rpip <- spTransform(rpip, utm56)
+
+    # determine the closest camp to the property in focus
+    dists <- gDistance(rpip, camps, byid=T)
+    closest <- camps@data[match(min(dists), dists),]
+
+    # append coordinates of the closest camp
+    df$Near_Camp_Coords[i] <- closest$Coords
+  }
+
+  # return updated dataframe
+  return(df)
+}
+
+# append coordinates of the nearest camp to properties
+HORSE_val <- findNearestCamp(HORSE_val, CAMP, F)
+IP <- findNearestCamp(IP, CAMP, T)
+
+# save results
+#write.csv(HORSE, "../Data/Final/Horse/Horse_Final.csv", row.names=F)
+#write.csv(IP, "../Data/Final/Spillover/IP_Final.csv", row.names=F)
+
+###################################################################################################
+# Build RPIP Dataset
+###################################################################################################
+
+# merge spillover events with all other horse properties
+RPIP <- rbind(IP, HORSE_val)
+# update unique numeric identifier
+RPIP$Id <- seq(1, nrow(RPIP), 1)
+# update row names
+row.names(RPIP) <- seq(1, nrow(RPIP), 1)
+
+# loop through each property
+for (i in 1:nrow(RPIP)) {
+  # subset the camp that is the closest camp to the property in focus
+  camp <- subset(CAMP, Coords == RPIP$Near_Camp_Coords[i])
+
+  # loop through selection of camp columns and append the information to the property in focus
+  for (j in 1:17) {
+    colName <- paste("Camp_", colnames(camp)[j], sep="")
+    RPIP[[colName]][i] <- camp[1,j]
+  }
+
+  # append information about the species population counts of the nearest camp to the property in
+    # focus based on the month of the property
+  if (RPIP$Month[i] == "June") {
+    RPIP$Bff[i] <- camp$Bff6
+    RPIP$GHff[i] <- camp$GHff6
+    RPIP$LRff[i] <- camp$LRff6
+    RPIP$Tot[i] <- camp$Tot6
+  } else if (RPIP$Month[i] == "July") {
+    RPIP$Bff[i] <- camp$Bff7
+    RPIP$GHff[i] <- camp$GHff7
+    RPIP$LRff[i] <- camp$LRff7
+    RPIP$Tot[i] <- camp$Tot7
+  } else if (RPIP$Month[i] == "August") {
+    RPIP$Bff[i] <- camp$Bff8
+    RPIP$GHff[i] <- camp$GHff8
+    RPIP$LRff[i] <- camp$LRff8
+    RPIP$Tot[i] <- camp$Tot8
+  } else if (RPIP$Month[i] == "October") {
+    RPIP$Bff[i] <- camp$Bff10
+    RPIP$GHff[i] <- camp$GHff10
+    RPIP$LRff[i] <- camp$LRff10
+    RPIP$Tot[i] <- camp$Tot10
+  }
+
+  # loop through remaining camp columns and append the information to the property in focus
+  for (j in 34:ncol(camp)) {
+    colName <- paste("Camp_", colnames(camp)[j], sep="")
+    RPIP[[colName]][i] <- camp[1,j]
+  }
+}
+
+# save results
+#write.csv(RPIP, "../Data/Final/RPIP/RPIP_Final.csv", row.names=F)
+
+```
+
+# Exploratory Data Analysis
+
+## The purpose of this section is to visually explore the camp data related to the risk factors highlighted in the research question and hypothesis
+
+```{r}
+###################################################################################################
+# Set Working Environment, Import Dependencies, and Load Data
+###################################################################################################
+
+#setwd("C:/Users/Nathan/Desktop/Project 1/Code")
+
+library(ggplot2)
+
+source("helpers.R")
+
+# load camp dataframe
+CAMP <- read.csv("../Data/Final/Camp/Camp_Final.csv")
+
+###################################################################################################
+# Plot for Camp Distribution Between States
+###################################################################################################
+
+p1 <- ggplot(CAMP, aes(x=State, fill=State)) +
+  theme_classic() +
+  geom_bar(stat="count") +
+  ggtitle("Camp Distribution Between States") +
+  xlab("State") +
+  ylab("Number of Camps") +
+  scale_fill_discrete(guide=F)
+p1
+
+
+#dev.copy(png, "../Figures/Camp/Camp Distribution Between States.png")
+#dev.off()
+
+###################################################################################################
+# Plot for Continuously Occupied
+###################################################################################################
+
+p1 <- ggplot(CAMP, aes(x=as.factor(Cont), fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank()) +
+  geom_bar(stat="count") +
+  ggtitle("Continuously Occupied") +
+  xlab("") +
+  ylab("Number of Camps") +
+  scale_fill_discrete(guide=F)
+p1
+
+p2 <- ggplot(CAMP, aes(x=as.factor(Cont), fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank()) +
+  geom_bar(stat="count", position="fill") +
+  ggtitle("(in percentage)") +
+  xlab("") +
+  ylab("Percentage of Camps") +
+  scale_x_discrete(labels=c("False", "True")) +
+  scale_fill_discrete(guide=F)
+p2
+
+p3 <- ggplot(CAMP, aes(x=as.factor(Cont_Bff), fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank(),
+        axis.title.y=element_blank()) +
+  geom_bar(stat="count") +
+  ggtitle("Continuously Occupied by BFF") +
+  xlab("") +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p3
+
+p4 <- ggplot(CAMP, aes(x=as.factor(Cont_Bff), fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.title.y=element_blank()) +
+  geom_bar(stat="count", position="fill") +
+  ggtitle("(in percentage)") +
+  xlab("") +
+  scale_x_discrete(labels=c("False", "True")) +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p4
+
+multiplot(p1, p2, p3, p4, cols=2)
+
+#dev.copy(png, "../Figures/Camp/Continuously Occupied.png")
+#dev.off()
+
+###################################################################################################
+# Plot for Establishment History (simplified)
+###################################################################################################
+
+p1 <- ggplot(CAMP, aes(x=Hist_Simp, fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank()) +
+  geom_bar(stat="count") +
+  ggtitle("Establishment History (simplified)") +
+  xlab("") +
+  ylab("Number of Camps") +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p1
+
+p2 <- ggplot(CAMP, aes(x=Hist_Simp, fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank()) +
+  geom_bar(stat="count", position="fill") +
+  ggtitle("(in percentage)") +
+  xlab("") +
+  ylab("Percentage of Camps") +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p2
+
+multiplot(p1, p2, cols=1)
+
+#dev.copy(png, "../Figures/Camp/Establishment History (simplified).png")
+#dev.off()
+
+###################################################################################################
+# Plot for Established 2007-or_later and 2010-_or_later
+###################################################################################################
+
+p1 <- ggplot(CAMP, aes(x=as.factor(Post_07), fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank()) +
+  geom_bar(stat="count") +
+  ggtitle("Established 2007 or later") +
+  xlab("") +
+  ylab("Number of Camps") +
+  scale_fill_discrete(guide=F)
+p1
+
+p2 <- ggplot(CAMP, aes(x=as.factor(Post_07), fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank()) +
+  geom_bar(stat="count", position="fill") +
+  ggtitle("(in percentage)") +
+  xlab("") +
+  ylab("Percentage of Camps") +
+  scale_x_discrete(labels=c("False", "True")) +
+  scale_fill_discrete(guide=F)
+p2
+
+p3 <- ggplot(CAMP, aes(x=as.factor(Post_10), fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank(),
+        axis.title.y=element_blank()) +
+  geom_bar(stat="count") +
+  ggtitle("Established 2010 or later") +
+  xlab("") +
+  ylab("Number of Camps") +
+  scale_x_discrete(labels=c("False", "True")) +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p3
+
+p4 <- ggplot(CAMP, aes(x=as.factor(Post_10), fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.title.y=element_blank()) +
+  geom_bar(stat="count", position="fill") +
+  ggtitle("(in percentage)") +
+  xlab("") +
+  ylab("Percentage of Camps") +
+  scale_x_discrete(labels=c("False", "True")) +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p4
+
+multiplot(p1, p2, p3, p4, cols=2)
+
+#dev.copy(png, "../Figures/Camp/Established 2007-or_later and 2010-_or_later.png")
+#dev.off()
+
+###################################################################################################
+# Plot for Established 2007_2010
+###################################################################################################
+
+p1 <- ggplot(CAMP, aes(x=as.factor(Short_07_10), fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank()) +
+  geom_bar(stat="count") +
+  ggtitle("Established 2007 or 2010") +
+  xlab("") +
+  ylab("Number of Camps") +
+  scale_x_discrete(labels=c("False", "True")) +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p1
+
+p2 <- ggplot(CAMP, aes(x=as.factor(Short_07_10), fill=as.factor(Event))) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank()) +
+  geom_bar(stat="count", position="fill") +
+  ggtitle("(in percentage)") +
+  xlab("") +
+  ylab("Percentage of Camps") +
+  scale_x_discrete(labels=c("False", "True")) +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p2
+
+multiplot(p1, p2, cols=1)
+
+#dev.copy(png, "../Figures/Camp/Established 2007_2010.png")
+#dev.off()
+
+###################################################################################################
+# Plot for Monthly Population Distribution
+###################################################################################################
+
+# purpose: create a transformed dataframe containing species population counts from wide-form to
+  # long-form for plotting
+# input: BFF population count, GHFF population count, LRFF population count, total population count,
+  # value for the max value subset, Boolean for whether or not zero-counts should be included
+# output: transformed dataframe of species population counts in long-form
+fitCensusData <- function(bff, ghff, lrff, tot, tail=F, zero=T) {
+  output <- data.frame(species=rep("BFF", length(bff)), count=bff)
+  output <- rbind(output, data.frame(species=rep("GHFF", length(ghff)), count=ghff))
+  output <- rbind(output, data.frame(species=rep("LRFF", length(lrff)), count=lrff))
+  output <- rbind(output, data.frame(species=rep("Total", length(tot)), count=tot))
+
+  if (!tail && !zero) {
+    output <- subset(output, count != 0)
+  } else if (tail && zero) {
+    output <- subset(output, count <= tail)
+  } else if (tail && !zero) {
+    output <- subset(output, count <= tail)
+    output <- subset(output, count != 0)
+  }
+
+  return(output)
+}
+
+df <- fitCensusData(CAMP$Bff6, CAMP$GHff6, CAMP$LRff6, CAMP$Tot6)
+
+p1 <- ggplot(df, aes(count, fill=species)) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank()) +
+  geom_histogram(show.legend=F, bins=20) +
+  ggtitle("June Population Distribution") +
+  xlab("Population Count") +
+  ylab("Frequency") +
+  scale_fill_manual("Species", limits=c("BFF", "GHFF", "LRFF", "Total"),
+                    values=c("deepskyblue4", "green4", "khaki4", "maroon"))
+p1
+
+df <- fitCensusData(CAMP$Bff7, CAMP$GHff7, CAMP$LRff7, CAMP$Tot7)
+
+p2 <- ggplot(df, aes(count, fill=species)) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank()) +
+  geom_histogram(show.legend=F, bins=20) +
+  ggtitle("July Population Distribution") +
+  xlab("Population Count") +
+  ylab("Frequency") +
+  scale_fill_manual("Species", limits=c("BFF", "GHFF", "LRFF", "Total"),
+                    values=c("deepskyblue4", "green4", "khaki4", "maroon"))
+p2
+
+df <- fitCensusData(CAMP$Bff8, CAMP$GHff8, CAMP$LRff8, CAMP$Tot8)
+
+p3 <- ggplot(df, aes(count, fill=species)) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank()) +
+  geom_histogram(show.legend=F, bins=20) +
+  ggtitle("August Population Distribution") +
+  xlab("Population Count") +
+  ylab("Frequency") +
+  scale_fill_manual("Species", limits=c("BFF", "GHFF", "LRFF", "Total"),
+                    values=c("deepskyblue4", "green4", "khaki4", "maroon"))
+p3
+
+df <- fitCensusData(CAMP$Bff10, CAMP$GHff10, CAMP$LRff10, CAMP$Tot10)
+
+p4 <- ggplot(df, aes(count, fill=species)) +
+  theme_classic() +
+  geom_histogram(show.legend=F, bins=20) +
+  ggtitle("October Population Distribution") +
+  xlab("Population Count") +
+  ylab("Frequency") +
+  scale_fill_manual("Species", limits=c("BFF", "GHFF", "LRFF", "Total"),
+                    values=c("deepskyblue4", "green4", "khaki4", "maroon"))
+p4
+
+df <- fitCensusData(CAMP$Bff6, CAMP$GHff6, CAMP$LRff6, CAMP$Tot6, tail=1000, zero=F)
+
+p5 <- ggplot(df, aes(count, fill=species)) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank(),
+        axis.title.y=element_blank(), axis.ticks.y=element_blank(), axis.text.y=element_blank()) +
+  geom_histogram(bins=20) +
+  ggtitle("(1 <= count => 1000)") +
+  xlab("Population Count") +
+  ylab("Frequency") +
+  scale_fill_manual("Species", limits=c("BFF", "GHFF", "LRFF", "Total"),
+                    values=c("deepskyblue4", "green4", "khaki4", "maroon"))
+p5
+
+df <- fitCensusData(CAMP$Bff7, CAMP$GHff7, CAMP$LRff7, CAMP$Tot7, tail=1000, zero=F)
+
+p6 <- ggplot(df, aes(count, fill=species)) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank(),
+        axis.title.y=element_blank(), axis.ticks.y=element_blank(), axis.text.y=element_blank()) +
+  geom_histogram(bins=20) +
+  xlab("Population Count") +
+  ylab("Frequency") +
+  scale_fill_manual("Species", limits=c("BFF", "GHFF", "LRFF", "Total"),
+                    values=c("deepskyblue4", "green4", "khaki4", "maroon"))
+p6
+
+df <- fitCensusData(CAMP$Bff8, CAMP$GHff8, CAMP$LRff8, CAMP$Tot8, tail=1000, zero=F)
+
+p7 <- ggplot(df, aes(count, fill=species)) +
+  theme_classic() +
+  theme(axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank(),
+        axis.title.y=element_blank(), axis.ticks.y=element_blank(), axis.text.y=element_blank()) +
+  geom_histogram(bins=20) +
+  xlab("Population Count") +
+  ylab("Frequency") +
+  scale_fill_manual("Species", limits=c("BFF", "GHFF", "LRFF", "Total"),
+                    values=c("deepskyblue4", "green4", "khaki4", "maroon"))
+p7
+
+df <- fitCensusData(CAMP$Bff10, CAMP$GHff10, CAMP$LRff10, CAMP$Tot10, tail=1000, zero=F)
+
+p8 <- ggplot(df, aes(count, fill=species)) +
+  theme_classic() +
+  theme(axis.title.y=element_blank(), axis.ticks.y=element_blank(), axis.text.y=element_blank()) +
+  geom_histogram(bins=20) +
+  xlab("Population Count") +
+  ylab("Frequency") +
+  scale_fill_manual("Species", limits=c("BFF", "GHFF", "LRFF", "Total"),
+                    values=c("deepskyblue4", "green4", "khaki4", "maroon"))
+p8
+
+multiplot(p1, p2, p3, p4, p5, p6, p7, p8, cols=2)
+
+#dev.copy(png, "../Figures/Camp/Monthly Population Distribution.png")
+#dev.off()
+
+###################################################################################################
+# Plot for Landuse
+###################################################################################################
+
+p1 <- ggplot(CAMP, aes(Fa_Size, fill=as.factor(Event))) +
+  theme_classic() +
+  geom_histogram(bins=30) +
+  ggtitle("Feeding Area Size") +
+  xlab("Unit of Measurement Unknown (Meters)") +
+  ylab("Frequency") +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p1
+
+p2 <- ggplot(CAMP, aes(Dist_Urb, fill=as.factor(Event))) +
+  theme_classic() +
+  geom_histogram(bins=30) +
+  ggtitle("Distance to Urban Area") +
+  xlab("Unit of Measurement Unknown (Kilometers?)") +
+  ylab("") +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p2
+
+p3 <- ggplot(CAMP, aes(Prop_Mod, fill=as.factor(Event))) +
+  theme_classic() +
+  geom_histogram(bins=30) +
+  ggtitle("Proportion of Feeding Area is Modified") +
+  xlab("Percentage") +
+  ylab("") +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p3
+
+p4 <- ggplot(CAMP, aes(Prop_Urb, fill=as.factor(Event))) +
+  theme_classic() +
+  geom_histogram(bins=30) +
+  ggtitle("Proportion of Feeding Area is Urban") +
+  xlab("Percentage") +
+  ylab("") +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p4
+
+p5 <- ggplot(CAMP, aes(Prop_Veg, fill=as.factor(Event))) +
+  theme_classic() +
+  geom_histogram(bins=30) +
+  ggtitle("Proportion of Feeding Area is Vegitative") +
+  xlab("Percentage") +
+  ylab("") +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p5
+
+multiplot(p1, p2, p3, p4, p5, cols=1)
+
+#dev.copy(png, "../Figures/Camp/Landuse.png")
+#dev.off()
+
+###################################################################################################
+# Plot for Horse Properties
+###################################################################################################
+
+p1 <- ggplot(CAMP, aes(Prop_Num_20km, fill=as.factor(Event))) +
+  theme_classic() +
+  geom_histogram(bins=30) +
+  ggtitle("Number of Horse Properties Within 20 Kilometers") +
+  xlab("Count") +
+  ylab("Frequency") +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p1
+
+p2 <- ggplot(CAMP, aes(Prop_Near_Dist, fill=as.factor(Event))) +
+  theme_classic() +
+  geom_histogram(bins=30) +
+  ggtitle("Distance to Nearest Horse Property") +
+  xlab("Meters") +
+  ylab("") +
+  scale_fill_discrete(aes(title="Event Camp"), labels=c("No", "Yes"))
+p2
+
+multiplot(p1, p2, cols=1)
+
+#dev.copy(png, "../Figures/Camp/Horse Properties.png")
+#dev.off()
+
+```
+
+# GLM Univariate Modeling
+
+## The purpose of this section is run univariate GLM models on the camp data related to the research question and hypothesis
+
+### Independent variable
+* 1 = Event Camp : camp was the closest occupied camp to a spillover event
+* 0 = Not an Event Camp
+* Null => No statistical difference between the characteristics of Event Camps and Non-Event Camps, therefore due to chance or covariates beyond the scope of the study
+
+
+```{r}
+###################################################################################################
+# Set Working Environment, Import Dependencies, and Load Data
+###################################################################################################
+
+#setwd("C:/Users/Nathan/Desktop/Project 1/Code")
+
+library(stargazer)
+library(MASS)
+
+# load camp dataset
+df <- read.csv("../Data/Final/Camp/Camp_Final.csv")
+
+# store the covariates to be modelled
+covars <- c("Cont", "Cont_Bff", "Hist_Simp", "Post_07", "Post_10", "Short_07_10", "Short_Any",
+            "Fa_Size", "Dist_Urb", "Prop_Mod", "Prop_Urb", "Prop_Veg", "Prop_In_20km",
+            "Prop_Near_Dist")
+
+# ititialize the HTML string for the model results
+starTable <- ""
+
+# purpose: runs univariate model of passed covariate and builds HTML table of results
+# input: the current HTML string of model results, covariate to be modelled, title of table results,
+  # label for dependant variable, label for covariate
+# output: HTML string of model results
+buildStarTable <- function(starTable, covar, title, dep.var.labels, covariate.labels) {
+  # ititialize return object
+  output <- ""
+
+  # run model
+  model <- glm(as.formula(paste("Event ~", covar, sep=" ")), family="binomial", df)
+
+  # build HTML string of results
+  gaze <- stargazer(model, type="html", ci=T, title=title, dep.var.labels=dep.var.labels,
+                    covariate.labels=covariate.labels, apply.coef=exp)
+  starTable <- paste(starTable, gaze, sep="")
+
+  for (i in 1:length(gaze)) {
+    output <- paste(output, gaze[i], sep="")
+  }
+
+  # append spacing for readability
+  output <- paste(output, '<div style="height: 50px;"></div>')
+
+  # return HTML table of model results
+  return(output)
+}
+
+###################################################################################################
+# Model and Table for Cont
+###################################################################################################
+
+covar <- "Cont"
+title <- "Continuously Occupied"
+dep.var.labels = c("0 = false, 1 = true")
+covariate.labels <- c("Continuously Occupied")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Cont_Bff
+###################################################################################################
+
+covar <- "Cont_Bff"
+title <- "Continuously Occupied by BFF"
+dep.var.labels = c("0 = false, 1 = true")
+covariate.labels <- c("Continuously Occupied by BFF")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Hist_Simp
+###################################################################################################
+
+covar <- "Hist_Simp"
+title <- "History of Establishment"
+dep.var.labels = c("Pre-2007, 2007-2009, 2010")
+covariate.labels <- c("History")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Post_07
+###################################################################################################
+
+covar <- "Post_07"
+title <- "Established 2007 or Later"
+dep.var.labels = c("0 = false, 1 = true")
+covariate.labels <- c("Formed 2007 or Later")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Post_10
+###################################################################################################
+
+covar <- "Post_10"
+title <- "Established 2010 or Later"
+dep.var.labels = c("0 = false, 1 = true")
+covariate.labels <- c("Formed 2010 or Later")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Short_07_10
+###################################################################################################
+
+covar <- "Short_07_10"
+title <- "Established During a Food Shortage (2007 or 2010)"
+dep.var.labels = c("0 = false, 1 = true")
+covariate.labels <- c("Formed in Food Shortage")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Short_Any
+###################################################################################################
+
+covar <- "Short_Any"
+title <- "Established During a Food Shortage (1998, 2003, 2007, 2010)"
+dep.var.labels = c("0 = false, 1 = true")
+covariate.labels <- c("Formed in Food Shortage")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Fa_Size
+###################################################################################################
+
+covar <- "Fa_Size"
+title <- "Feeding Area Size"
+dep.var.labels = c("In Meters (?)")
+covariate.labels <- c("Feeding Area Size")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Dist_Urb
+###################################################################################################
+
+covar <- "Dist_Urb"
+title <- "Distance to Urban Area"
+dep.var.labels = c("In Kilometers (?)")
+covariate.labels <- c("Distance to Urban Area")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Prop_Mod
+###################################################################################################
+
+covar <- "Prop_Mod"
+title <- "Proportion Modified"
+dep.var.labels = c("In Percentage (?)")
+covariate.labels <- c("Proportion Modified")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Prop_Urb
+###################################################################################################
+
+covar <- "Prop_Urb"
+title <- "Proportion Urban"
+dep.var.labels = c("In Percentage (?)")
+covariate.labels <- c("Proportion Urban")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Prop_Veg
+###################################################################################################
+
+covar <- "Prop_Veg"
+title <- "Proportion Vegitation"
+dep.var.labels = c("In Percentage (?)")
+covariate.labels <- c("Proportion Vegitation")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Prop_In_20km
+###################################################################################################
+
+covar <- "Prop_In_20km"
+title <- "Horse Properties within 20 Kilometers"
+dep.var.labels = c("Count")
+covariate.labels <- c("Horse Properties in 20km")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Model and Table for Prop_Near_Dist
+###################################################################################################
+
+covar <- "Prop_Near_Dist"
+title <- "Distance to the Nearest Horse Property"
+dep.var.labels = c("In Meters")
+covariate.labels <- c("Distance to Horse Property")
+starTable <- paste(starTable,
+                   buildStarTable(starTable, covar, title, dep.var.labels, covariate.labels),
+                   sep="")
+
+###################################################################################################
+# Finish HTML File
+###################################################################################################
+
+# build full HTML file
+starTable <- paste("<html><head></head><body>", starTable, "</body></html>", sep="")
+
+# save results as HTML file
+#write(starTable, "../Results/GLM_results.html")
+
+```
